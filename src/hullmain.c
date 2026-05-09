@@ -397,23 +397,64 @@ void errline(char *s)
   return;
 }
 
-void tell_options(void)
+#define POWERCRUST_VERSION "1.3"
+
+static void print_banner(void)
 {
-  errline("options:");
-  errline( "-m mult       multiply by mult before rounding");
-  errline( "-s seed       shuffle with srand(seed)");
-  errline( "-i <file>     read input from <file>");
-  errline( "              Supported formats: .pts (native), .obj, .ply, .gii");
-  errline( "              PLY: ASCII, binary little-endian, binary big-endian");
-  errline( "              GII: ASCII, Base64Binary, GZipBase64Binary");
-  errline( "-O <fmt>      also write pc.off as <fmt>: obj | ply_ascii | ply_binary");
-  errline( "-X <file>     chatter to <file>");
-  errline( "-oF<name>     prefix of output files is <name>");
-  errline( "-t <val>      min cosine of allowed dihedral angle between polar balls");
-  errline( "-w <val>      same as -t, for labelling unlabelled poles (second pass)");
-  errline( "-D            no propagation for 1st pole of non-manifold cells");
-  errline( "-B            throw away both poles for non-manifold cells");
-  errline( "-R <val>      guess for r, used to eliminate bad second poles");
+  fprintf(stderr,
+    "PowerCrust %s\n"
+    "Surface reconstruction and medial-axis estimation from point clouds.\n"
+    "Original algorithm: Nina Amenta, Sunghee Choi, Ravi Krishna Kolluri\n"
+    "University of Texas at Austin, 2000.  GPL licence.\n"
+    "\n",
+    POWERCRUST_VERSION);
+}
+
+static void print_usage(const char *prog)
+{
+  fprintf(stderr,
+    "Usage: %s -i <input> [OPTIONS]\n"
+    "\n"
+    "Input formats\n"
+    "  .pts          Native ASCII point cloud (one 'x y z' per line)\n"
+    "  .obj          ASCII Wavefront OBJ     (vertex positions extracted)\n"
+    "  .ply          PLY — ASCII, binary little-endian, binary big-endian\n"
+    "  .gii          GIFTI surface — ASCII, Base64Binary, GZipBase64Binary\n"
+    "\n"
+    "Output files (written to the current directory)\n"
+    "  pc.off        Power-crust surface mesh  (OFF format)\n"
+    "  axis.off      Medial axis (edges, OFF format)\n"
+    "  axisface.off  Medial axis (triangles, OFF format)\n"
+    "  inpole        Inner pole centres\n"
+    "  outpole       Outer pole centres\n"
+    "  inpball       Inner polar balls (centre + radius)\n"
+    "  poleinfo      Full pole data (position, radius, label, distance)\n"
+    "\n"
+    "Options\n"
+    "  -i <file>     Input file (see formats above)\n"
+    "  -a            Medial-axis only: skip power-crust output,\n"
+    "                write axis.off and axisface.off only\n"
+    "  -O <fmt>      Also write pc.off as another format:\n"
+    "                  obj        Wavefront OBJ  -> pc.obj\n"
+    "                  ply_ascii  ASCII PLY       -> pc.ply\n"
+    "                  ply_binary Binary LE PLY   -> pc_binary.ply\n"
+    "  -m <mult>     Multiply coordinates by <mult> before rounding [100000]\n"
+    "  -s <seed>     Random seed for point shuffling\n"
+    "  -t <val>      Min cosine of dihedral angle between polar balls [0.0]\n"
+    "  -w <val>      Same as -t for second-pass unlabelled poles\n"
+    "  -R <val>      Estimated r value; eliminates bad second poles\n"
+    "  -D            No propagation for first pole of non-manifold cells\n"
+    "  -B            Discard both poles for non-manifold cells\n"
+    "  -p            Poles given as input (skip point-cloud processing)\n"
+    "  -oF<prefix>   Prefix for the main output file\n"
+    "  -X <file>     Write diagnostic chatter to <file> (default: stderr)\n"
+    "\n"
+    "Examples\n"
+    "  %s -i cloud.pts\n"
+    "  %s -i scan.ply -O obj\n"
+    "  %s -i brain.gii -a          # medial axis only\n"
+    "\n",
+    prog, prog, prog, prog);
 }
 
 void echo_command_line(FILE *F, int argc, char **argv)
@@ -504,7 +545,7 @@ int set_out_func(char *s)
       return i;
     }
   }
-  tell_options();
+  print_usage("powercrust");
   return 0;
 }
 
@@ -529,7 +570,8 @@ int main(int argc, char **argv) {
         vol = 0,
         ofn = 0,
         ifn = 0,
-        bad = 0; /* for -B */
+        bad = 0, /* for -B */
+        axis_only = 0; /* -a: skip power-crust, output medial axis only */
   int option, num_poles = 0;
   double pole_angle;
   char ofile[50] = "",
@@ -537,6 +579,14 @@ int main(int argc, char **argv) {
        ofilepre[50] = "",
        out_mesh_fmt[32] = ""; /* -O obj|ply_ascii|ply_binary */
   FILE *INPOLE, *OUTPOLE, *HEAD,*POLEINFO;
+
+  /* No arguments: print banner + usage and exit. */
+  if (argc == 1)
+  {
+    print_banner();
+    print_usage(argv[0]);
+    return 0;
+  }
   int main_out_form=0, i,k;
 
   simplex *root;
@@ -555,7 +605,7 @@ int main(int argc, char **argv) {
   est_r = 1;
   DFILE = stderr;
 
-  while ((option = getopt(argc, argv, "i:m:rs:DBo:X::f:t:w:R:pO:")) != EOF) {
+  while ((option = getopt(argc, argv, "i:m:rs:DBo:X::f:t:w:R:pO:a")) != EOF) {
     switch (option)
     {
       case 'm' :
@@ -619,8 +669,12 @@ int main(int argc, char **argv) {
       case 'O':
         strncpy(out_mesh_fmt, optarg, sizeof(out_mesh_fmt) - 1);
         break;
+      case 'a':
+        axis_only = 1;
+        break;
       default :
-        tell_options();
+        print_banner();
+        print_usage(argv[0]);
         exit(1);
     }
   }
@@ -938,15 +992,18 @@ int main(int argc, char **argv) {
         fprintf(OUTPOLE,"%f %f %f\n",tmp_pt[0],tmp_pt[1],tmp_pt[2]);
       }
 
-      eindex = adjlist[i].eptr;
-      while (eindex!=NULL)
+      if (!axis_only)
       {
-        if ((i < eindex->pid) &&
-          (antiLabel(adjlist[i].label) == adjlist[eindex->pid].label))
+        eindex = adjlist[i].eptr;
+        while (eindex!=NULL)
         {
-          construct_face(eindex->simp,eindex->kth);
+          if ((i < eindex->pid) &&
+            (antiLabel(adjlist[i].label) == adjlist[eindex->pid].label))
+          {
+            construct_face(eindex->simp,eindex->kth);
+          }
+          eindex = eindex->next;
         }
-        eindex = eindex->next;
       }
     }
   }
@@ -955,31 +1012,42 @@ int main(int argc, char **argv) {
   efclose(PNF);
   efclose(POLEINFO);
 
-  /* powercrust output done... */
-  HEAD = fopen("head","w");
-  fprintf(HEAD,"OFF\n");
-  fprintf(HEAD,"%d %d %d\n",num_vtxs,num_faces,0);
-  efclose(HEAD);
-  system("cat head pc pnf > pc.off");
-  system("rm head pc pnf");
-
-  /* Optionally convert pc.off to another format (-O flag). */
-  if (out_mesh_fmt[0] != '\0')
+  if (!axis_only)
   {
-    char out_mesh_file[256];
-    if (strcmp(out_mesh_fmt, "obj") == 0)
-      snprintf(out_mesh_file, sizeof(out_mesh_file), "pc.obj");
-    else if (strcmp(out_mesh_fmt, "ply_ascii") == 0)
-      snprintf(out_mesh_file, sizeof(out_mesh_file), "pc.ply");
-    else if (strcmp(out_mesh_fmt, "ply_binary") == 0)
-      snprintf(out_mesh_file, sizeof(out_mesh_file), "pc_binary.ply");
-    else
-      snprintf(out_mesh_file, sizeof(out_mesh_file), "pc.off");
+    /* Assemble pc.off from intermediate files. */
+    HEAD = fopen("head","w");
+    fprintf(HEAD,"OFF\n");
+    fprintf(HEAD,"%d %d %d\n",num_vtxs,num_faces,0);
+    efclose(HEAD);
+    system("cat head pc pnf > pc.off");
+    system("rm head pc pnf");
+    fprintf(DFILE,"Power crust written to pc.off (%d vertices, %d faces)\n",
+            num_vtxs, num_faces);
 
-    if (convert_off_file("pc.off", out_mesh_file, out_mesh_fmt))
-      fprintf(DFILE, "Power crust also written to %s\n", out_mesh_file);
-    else
-      fprintf(DFILE, "Warning: -O conversion to '%s' failed\n", out_mesh_fmt);
+    /* Optionally convert pc.off to another format (-O flag). */
+    if (out_mesh_fmt[0] != '\0')
+    {
+      char out_mesh_file[256];
+      if (strcmp(out_mesh_fmt, "obj") == 0)
+        snprintf(out_mesh_file, sizeof(out_mesh_file), "pc.obj");
+      else if (strcmp(out_mesh_fmt, "ply_ascii") == 0)
+        snprintf(out_mesh_file, sizeof(out_mesh_file), "pc.ply");
+      else if (strcmp(out_mesh_fmt, "ply_binary") == 0)
+        snprintf(out_mesh_file, sizeof(out_mesh_file), "pc_binary.ply");
+      else
+        snprintf(out_mesh_file, sizeof(out_mesh_file), "pc.off");
+
+      if (convert_off_file("pc.off", out_mesh_file, out_mesh_fmt))
+        fprintf(DFILE, "Power crust also written to %s\n", out_mesh_file);
+      else
+        fprintf(DFILE, "Warning: -O conversion to '%s' failed\n", out_mesh_fmt);
+    }
+  }
+  else
+  {
+    /* Axis-only mode: discard the empty intermediate files. */
+    system("rm -f pc pnf");
+    fprintf(DFILE,"Axis-only mode: power-crust output skipped.\n");
   }
 
   /* compute the medial axis */
