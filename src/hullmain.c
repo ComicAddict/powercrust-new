@@ -438,6 +438,11 @@ static void print_usage(const char *prog)
     "                  obj        Wavefront OBJ  -> pc.obj\n"
     "                  ply_ascii  ASCII PLY       -> pc.ply\n"
     "                  ply_binary Binary LE PLY   -> pc_binary.ply\n"
+    "  -A <fmt>      Also write axis.off / axisface.off as another format\n"
+    "                (same format tokens as -O; axis PLY includes edge elements)\n"
+    "                  obj        -> axis.obj, axisface.obj\n"
+    "                  ply_ascii  -> axis.ply, axisface.ply\n"
+    "                  ply_binary -> axis_binary.ply, axisface_binary.ply\n"
     "  -m <mult>     Multiply coordinates by <mult> before rounding [100000]\n"
     "  -s <seed>     Random seed for point shuffling\n"
     "  -t <val>      Min cosine of dihedral angle between polar balls [0.0]\n"
@@ -452,7 +457,7 @@ static void print_usage(const char *prog)
     "Examples\n"
     "  %s -i cloud.pts\n"
     "  %s -i scan.ply -O obj\n"
-    "  %s -i brain.gii -a          # medial axis only\n"
+    "  %s -i brain.gii -a -A ply_ascii   # medial axis only, PLY output\n"
     "\n",
     prog, prog, prog, prog);
 }
@@ -577,7 +582,8 @@ int main(int argc, char **argv) {
   char ofile[50] = "",
        ifile[50] = "",
        ofilepre[50] = "",
-       out_mesh_fmt[32] = ""; /* -O obj|ply_ascii|ply_binary */
+       out_mesh_fmt[32]  = "", /* -O obj|ply_ascii|ply_binary  (pc.off) */
+       axis_mesh_fmt[32] = ""; /* -A obj|ply_ascii|ply_binary  (axis files) */
   FILE *INPOLE, *OUTPOLE, *HEAD,*POLEINFO;
 
   /* No arguments: print banner + usage and exit. */
@@ -605,7 +611,7 @@ int main(int argc, char **argv) {
   est_r = 1;
   DFILE = stderr;
 
-  while ((option = getopt(argc, argv, "i:m:rs:DBo:X::f:t:w:R:pO:a")) != EOF) {
+  while ((option = getopt(argc, argv, "i:m:rs:DBo:X::f:t:w:R:pO:A:a")) != EOF) {
     switch (option)
     {
       case 'm' :
@@ -668,6 +674,9 @@ int main(int argc, char **argv) {
         break;
       case 'O':
         strncpy(out_mesh_fmt, optarg, sizeof(out_mesh_fmt) - 1);
+        break;
+      case 'A':
+        strncpy(axis_mesh_fmt, optarg, sizeof(axis_mesh_fmt) - 1);
         break;
       case 'a':
         axis_only = 1;
@@ -1075,6 +1084,37 @@ int main(int argc, char **argv) {
   efclose(AXISFACE);
   system("cat head pole axisface > axisface.off");
   system("rm -f head pole axis axisface tpoleinfo sp");
+
+  /* Optionally convert axis files to another format (-A flag). */
+  if (axis_mesh_fmt[0] != '\0')
+  {
+    char axis_out[256], axisface_out[256];
+    if (strcmp(axis_mesh_fmt, "obj") == 0) {
+      snprintf(axis_out,     sizeof(axis_out),     "axis.obj");
+      snprintf(axisface_out, sizeof(axisface_out), "axisface.obj");
+    } else if (strcmp(axis_mesh_fmt, "ply_ascii") == 0) {
+      snprintf(axis_out,     sizeof(axis_out),     "axis.ply");
+      snprintf(axisface_out, sizeof(axisface_out), "axisface.ply");
+    } else if (strcmp(axis_mesh_fmt, "ply_binary") == 0) {
+      snprintf(axis_out,     sizeof(axis_out),     "axis_binary.ply");
+      snprintf(axisface_out, sizeof(axisface_out), "axisface_binary.ply");
+    } else {
+      axis_out[0] = axisface_out[0] = '\0';
+      fprintf(DFILE, "Warning: -A unknown format '%s'; use obj/ply_ascii/ply_binary\n",
+              axis_mesh_fmt);
+    }
+    if (axis_out[0] != '\0') {
+      if (convert_axis_off_file("axis.off", axis_out, axis_mesh_fmt))
+        fprintf(DFILE, "Axis also written to %s\n", axis_out);
+      else
+        fprintf(DFILE, "Warning: -A conversion of axis.off failed\n");
+      if (convert_off_file("axisface.off", axisface_out, axis_mesh_fmt))
+        fprintf(DFILE, "Axisface also written to %s\n", axisface_out);
+      else
+        fprintf(DFILE, "Warning: -A conversion of axisface.off failed\n");
+    }
+  }
+
   /* power shape output done */
 
   efclose(INPOLE);

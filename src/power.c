@@ -359,7 +359,8 @@ void *compute_axis (simplex *s, void *p) {
                 point2 = v[v2[k]];
                 pindex=site_numm(point1);
                 qindex=site_numm(point2);
-                if(adjlist[pindex].label==IN && adjlist[qindex].label==IN)
+                if(pindex >= 0 && qindex >= 0 &&
+                   adjlist[pindex].label==IN && adjlist[qindex].label==IN)
                 {
                     if(s->edgestatus[k]!=ADDAXIS) {
                         num_axedgs++;

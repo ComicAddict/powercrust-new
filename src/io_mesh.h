@@ -47,6 +47,18 @@ int  convert_off_file(const char *off_file,
                       const char *out_file,
                       const char *format);
 
+/*
+ * convert_axis_off_file -- translate axis.off (mixed 2-vertex edges +
+ * 3-vertex faces) to another format.
+ *   PLY output: element edge (vertex1/vertex2) + element face (list).
+ *   OBJ output: "l" line elements for edges, "f" for faces.
+ *   format: "obj" | "ply_ascii" | "ply_binary"
+ * Returns 1 on success, 0 on failure.
+ */
+int  convert_axis_off_file(const char *off_file,
+                            const char *out_file,
+                            const char *format);
+
 #ifdef __cplusplus
 }
 #endif

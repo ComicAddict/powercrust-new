@@ -813,4 +813,181 @@ int convert_off_file(const char *off_file,
     return 0;
 }
 
+/* =========================================================
+ * convert_axis_off_file -- convert axis.off (mixed 2/3-vertex OFF) to PLY/OBJ.
+ *
+ * axis.off has:
+ *   - standard OFF header + vertex block
+ *   - primitive block mixing "2 a b" edge lines and "3 a b c" face lines
+ *
+ * PLY output uses element edge (vertex1/vertex2) + element face (list).
+ * OBJ  output uses "l a b" line elements + "f a b c" face elements.
+ * ========================================================= */
+
+int convert_axis_off_file(const char *off_file,
+                           const char *out_file,
+                           const char *format)
+{
+    if (!off_file || !out_file || !format) return 0;
+
+    FILE *f = std::fopen(off_file, "r");
+    if (!f) {
+        std::fprintf(stderr, "io_mesh: cannot read axis OFF file '%s'\n", off_file);
+        return 0;
+    }
+
+    char line[512];
+
+    /* Skip to OFF header line */
+    while (std::fgets(line, sizeof(line), f)) {
+        std::string l = str_trim(std::string(line));
+        if (l.empty() || l[0] == '#') continue;
+        if (l.substr(0, 3) == "OFF") break;
+    }
+
+    /* Read counts: nv = vertices, np = total primitives (edges + faces) */
+    int nv = 0, np = 0, dummy = 0;
+    while (std::fgets(line, sizeof(line), f)) {
+        std::string l = str_trim(std::string(line));
+        if (l.empty() || l[0] == '#') continue;
+        std::sscanf(l.c_str(), "%d %d %d", &nv, &np, &dummy);
+        break;
+    }
+
+    /* Read vertices */
+    std::vector<double> verts(static_cast<size_t>(nv) * 3);
+    for (int i = 0; i < nv; i++) {
+        while (std::fgets(line, sizeof(line), f)) {
+            std::string l = str_trim(std::string(line));
+            if (l.empty() || l[0] == '#') continue;
+            std::sscanf(l.c_str(), "%lf %lf %lf",
+                        &verts[i*3], &verts[i*3+1], &verts[i*3+2]);
+            break;
+        }
+    }
+
+    /* Read primitives, split into edges and triangles */
+    std::vector<std::pair<int,int>>  edges;
+    std::vector<std::vector<int>>    faces;
+
+    for (int i = 0; i < np; i++) {
+        while (std::fgets(line, sizeof(line), f)) {
+            std::string l = str_trim(std::string(line));
+            if (l.empty() || l[0] == '#') continue;
+            int k = 0;
+            std::sscanf(l.c_str(), "%d", &k);
+            if (k == 2) {
+                int a = 0, b = 0;
+                std::sscanf(l.c_str(), "%*d %d %d", &a, &b);
+                edges.push_back({a, b});
+            } else if (k >= 3) {
+                std::vector<int> face(static_cast<size_t>(k));
+                const char *p = l.c_str();
+                while (*p && !std::isspace((unsigned char)*p)) ++p;
+                for (int j = 0; j < k; j++) {
+                    while (*p && std::isspace((unsigned char)*p)) ++p;
+                    int idx = 0, nc = 0;
+                    std::sscanf(p, "%d%n", &idx, &nc);
+                    face[j] = idx;
+                    p += nc;
+                }
+                faces.push_back(face);
+            }
+            break;
+        }
+    }
+    std::fclose(f);
+
+    std::string fmt(format);
+
+    if (fmt == "ply_ascii") {
+        FILE *out = std::fopen(out_file, "w");
+        if (!out) return 0;
+        std::fprintf(out, "ply\nformat ascii 1.0\n");
+        std::fprintf(out, "element vertex %d\n", nv);
+        std::fprintf(out, "property double x\nproperty double y\nproperty double z\n");
+        if (!edges.empty()) {
+            std::fprintf(out, "element edge %d\n", (int)edges.size());
+            std::fprintf(out, "property int vertex1\nproperty int vertex2\n");
+        }
+        if (!faces.empty()) {
+            std::fprintf(out, "element face %d\n", (int)faces.size());
+            std::fprintf(out, "property list uchar int vertex_indices\n");
+        }
+        std::fprintf(out, "end_header\n");
+        for (int i = 0; i < nv; i++)
+            std::fprintf(out, "%.12g %.12g %.12g\n",
+                         verts[i*3], verts[i*3+1], verts[i*3+2]);
+        for (const auto &e : edges)
+            std::fprintf(out, "%d %d\n", e.first, e.second);
+        for (const auto &face : faces) {
+            std::fprintf(out, "%d", (int)face.size());
+            for (int idx : face) std::fprintf(out, " %d", idx);
+            std::fprintf(out, "\n");
+        }
+        std::fclose(out);
+        return 1;
+
+    } else if (fmt == "ply_binary") {
+        FILE *out = std::fopen(out_file, "wb");
+        if (!out) return 0;
+        std::fprintf(out, "ply\nformat binary_little_endian 1.0\n");
+        std::fprintf(out, "element vertex %d\n", nv);
+        std::fprintf(out, "property float x\nproperty float y\nproperty float z\n");
+        if (!edges.empty()) {
+            std::fprintf(out, "element edge %d\n", (int)edges.size());
+            std::fprintf(out, "property int vertex1\nproperty int vertex2\n");
+        }
+        if (!faces.empty()) {
+            std::fprintf(out, "element face %d\n", (int)faces.size());
+            std::fprintf(out, "property list uchar int vertex_indices\n");
+        }
+        std::fprintf(out, "end_header\n");
+        for (int i = 0; i < nv; i++) {
+            for (int k = 0; k < 3; k++) {
+                float fv = static_cast<float>(verts[i*3+k]);
+                std::fwrite(&fv, sizeof(float), 1, out);
+            }
+        }
+        for (const auto &e : edges) {
+            int32_t a = static_cast<int32_t>(e.first);
+            int32_t b = static_cast<int32_t>(e.second);
+            std::fwrite(&a, sizeof(int32_t), 1, out);
+            std::fwrite(&b, sizeof(int32_t), 1, out);
+        }
+        for (const auto &face : faces) {
+            uint8_t cnt = static_cast<uint8_t>(face.size());
+            std::fwrite(&cnt, 1, 1, out);
+            for (int idx : face) {
+                int32_t v = static_cast<int32_t>(idx);
+                std::fwrite(&v, sizeof(int32_t), 1, out);
+            }
+        }
+        std::fclose(out);
+        return 1;
+
+    } else if (fmt == "obj") {
+        FILE *out = std::fopen(out_file, "w");
+        if (!out) return 0;
+        std::fprintf(out, "# Converted from %s by PowerCrust\n", off_file);
+        for (int i = 0; i < nv; i++)
+            std::fprintf(out, "v %.12g %.12g %.12g\n",
+                         verts[i*3], verts[i*3+1], verts[i*3+2]);
+        for (const auto &e : edges)
+            std::fprintf(out, "l %d %d\n", e.first + 1, e.second + 1);
+        for (const auto &face : faces) {
+            std::fprintf(out, "f");
+            for (int idx : face) std::fprintf(out, " %d", idx + 1);
+            std::fprintf(out, "\n");
+        }
+        std::fclose(out);
+        return 1;
+    }
+
+    std::fprintf(stderr,
+        "io_mesh: unknown axis output format '%s'. "
+        "Use 'obj', 'ply_ascii', or 'ply_binary'.\n", format);
+    return 0;
+}
+
 } /* extern "C" */
