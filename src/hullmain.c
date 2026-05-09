@@ -42,9 +42,15 @@
 #include <getopt.h>
 #include <ctype.h>
 
+#ifdef _OPENMP
+#  include <omp.h>
+#endif
+
 #define POINTSITES 1
 
 #include "hull.h"
+#include "io_mesh.h"
+#include "simd_math.h"
 
 double bound[8][3], omaxs[3], omins[3];  /* 8 vertices for bounding box */
 point site_blocks[MAXBLOCKS];
@@ -394,16 +400,20 @@ void errline(char *s)
 void tell_options(void)
 {
   errline("options:");
-  errline( "-m mult  multiply by mult before rounding;");
-  errline( "-s seed  shuffle with srand(seed);");
-  errline( "-i<name> read input from <name>;");
-  errline( "-X<name> chatter to <name>;");
-  errline( "-oF<name>  prefix of output files is <name>;");
-  errline( "-t min cosine of allowed dihedral angle btwn polar balls");
-  errline( "-w same as -t, but for trying to label unlabled poles, the second time around.");
-  errline( "-D no propagation for 1st pole of non-manifold cells");
-  errline( "-B throw away both poles for non-manifold cells");
-  errline( "-R guess for value of r, used to eliminate bad second poles");
+  errline( "-m mult       multiply by mult before rounding");
+  errline( "-s seed       shuffle with srand(seed)");
+  errline( "-i <file>     read input from <file>");
+  errline( "              Supported formats: .pts (native), .obj, .ply, .gii");
+  errline( "              PLY: ASCII, binary little-endian, binary big-endian");
+  errline( "              GII: ASCII, Base64Binary, GZipBase64Binary");
+  errline( "-O <fmt>      also write pc.off as <fmt>: obj | ply_ascii | ply_binary");
+  errline( "-X <file>     chatter to <file>");
+  errline( "-oF<name>     prefix of output files is <name>");
+  errline( "-t <val>      min cosine of allowed dihedral angle between polar balls");
+  errline( "-w <val>      same as -t, for labelling unlabelled poles (second pass)");
+  errline( "-D            no propagation for 1st pole of non-manifold cells");
+  errline( "-B            throw away both poles for non-manifold cells");
+  errline( "-R <val>      guess for r, used to eliminate bad second poles");
 }
 
 void echo_command_line(FILE *F, int argc, char **argv)
@@ -414,6 +424,70 @@ void echo_command_line(FILE *F, int argc, char **argv)
     fprintf(F, "%s%s", *argv++, (argc>0) ? " " : "");
   }
   fprintf(F,"\n");
+}
+
+/* -----------------------------------------------------------------------
+ * Mesh-format helpers
+ * --------------------------------------------------------------------- */
+
+/* Return 1 if filename has an extension we can read as a mesh (.obj/.ply/.gii). */
+static int is_mesh_format(const char *filename)
+{
+    const char *dot = strrchr(filename, '.');
+    if (!dot) return 0;
+    return strcmp(dot, ".obj") == 0 ||
+           strcmp(dot, ".ply") == 0 ||
+           strcmp(dot, ".gii") == 0;
+}
+
+/*
+ * load_sites_from_mesh -- read vertices from an OBJ/PLY/GII file and
+ * populate the internal site-block storage used by the convex-hull code,
+ * exactly as read_next_site() does for the native .pts format.
+ *
+ * Requires: TFILE opened, mult_up set, dims not yet initialised.
+ * Sets:     dim, point_size, site_size, mins[], maxs[], num_sites.
+ */
+static void load_sites_from_mesh(const char *filename)
+{
+    MeshVertices mv;
+    int i, k;
+
+    if (!read_mesh_vertices(filename, &mv) || mv.n == 0) {
+        fprintf(DFILE, "load_sites_from_mesh: failed to read '%s'\n", filename);
+        exit(1);
+    }
+    fprintf(DFILE, "Loaded %d vertices from mesh file '%s'\n", mv.n, filename);
+
+    dim = 3;
+    point_size = site_size = sizeof(Coord) * dim;
+
+    for (k = 0; k < dim; k++) {
+        mins[k] =  DBL_MAX;
+        maxs[k] = -DBL_MAX;
+    }
+
+    assert(TFILE != NULL);
+
+    for (i = 0; i < mv.n; i++) {
+        double coords[3];
+        coords[0] = mv.x[i];
+        coords[1] = mv.y[i];
+        coords[2] = mv.z[i];
+
+        p = new_site(p, (long)i);
+        for (k = 0; k < dim; k++) {
+            p[k] = floor(mult_up * coords[k] + 0.5);
+            if (p[k] < mins[k]) mins[k] = p[k];
+            if (p[k] > maxs[k]) maxs[k] = p[k];
+        }
+        /* Mirror what read_next_site() does: record original coordinates. */
+        fprintf(TFILE, "%f %f %f\n", coords[0], coords[1], coords[2]);
+    }
+    fflush(TFILE);
+    num_sites = (long)mv.n;
+
+    free_mesh_vertices(&mv);
 }
 
 char *output_forms[] = {"vn", "ps", "mp", "cpr", "off"};
@@ -460,7 +534,8 @@ int main(int argc, char **argv) {
   double pole_angle;
   char ofile[50] = "",
        ifile[50] = "",
-       ofilepre[50] = "";
+       ofilepre[50] = "",
+       out_mesh_fmt[32] = ""; /* -O obj|ply_ascii|ply_binary */
   FILE *INPOLE, *OUTPOLE, *HEAD,*POLEINFO;
   int main_out_form=0, i,k;
 
@@ -480,7 +555,7 @@ int main(int argc, char **argv) {
   est_r = 1;
   DFILE = stderr;
 
-  while ((option = getopt(argc, argv, "i:m:rs:DBo:X::f:t:w:R:p")) != EOF) {
+  while ((option = getopt(argc, argv, "i:m:rs:DBo:X::f:t:w:R:pO:")) != EOF) {
     switch (option)
     {
       case 'm' :
@@ -541,6 +616,9 @@ int main(int argc, char **argv) {
       case 'p':
         poleInput=1;
         break;
+      case 'O':
+        strncpy(out_mesh_fmt, optarg, sizeof(out_mesh_fmt) - 1);
+        break;
       default :
         tell_options();
         exit(1);
@@ -554,7 +632,6 @@ int main(int argc, char **argv) {
   if (!poleInput)
   {
     ifn = (strlen(ifile)!=0);
-    INFILE = ifn ? efopen(ifile, "r") : stdin;
     fprintf(DFILE, "reading from %s\n", ifn ? ifile : "stdin");
 
     ofn = (strlen(ofile)!=0);
@@ -576,20 +653,36 @@ int main(int argc, char **argv) {
       fprintf(DFILE, "no main output\n");
     }
 
-    read_next_site(-1);
-    fprintf(DFILE,"dim=%d\n",dim);
-    fflush(DFILE);
-    if (dim > MAXDIM)
+    if (ifn && is_mesh_format(ifile))
     {
-      panic("dimension bound MAXDIM exceeded");
+      /* --- Mesh input path: OBJ / PLY / GII --- */
+      load_sites_from_mesh(ifile);
+      fprintf(DFILE, "dim=%d (mesh input)\n", dim);
+      fflush(DFILE);
+      if (dim > MAXDIM)
+      {
+        panic("dimension bound MAXDIM exceeded");
+      }
     }
+    else
+    {
+      /* --- Native .pts input path --- */
+      INFILE = ifn ? efopen(ifile, "r") : stdin;
+      read_next_site(-1);
+      fprintf(DFILE,"dim=%d\n",dim);
+      fflush(DFILE);
+      if (dim > MAXDIM)
+      {
+        panic("dimension bound MAXDIM exceeded");
+      }
 
-    point_size = site_size = sizeof(Coord)*dim;
+      point_size = site_size = sizeof(Coord)*dim;
 
-    fprintf(DFILE, "reading sites...");
-    for (num_sites=0; read_next_site(num_sites); num_sites++);
-    fprintf(DFILE,"done; num_sites=%ld\n", num_sites);
-    fflush(DFILE);
+      fprintf(DFILE, "reading sites...");
+      for (num_sites=0; read_next_site(num_sites); num_sites++);
+      fprintf(DFILE,"done; num_sites=%ld\n", num_sites);
+      fflush(DFILE);
+    }
     read_bounding_box(num_sites);
     num_sites += 8;
     fprintf(DFILE,"shuffling...");
@@ -870,6 +963,25 @@ int main(int argc, char **argv) {
   system("cat head pc pnf > pc.off");
   system("rm head pc pnf");
 
+  /* Optionally convert pc.off to another format (-O flag). */
+  if (out_mesh_fmt[0] != '\0')
+  {
+    char out_mesh_file[256];
+    if (strcmp(out_mesh_fmt, "obj") == 0)
+      snprintf(out_mesh_file, sizeof(out_mesh_file), "pc.obj");
+    else if (strcmp(out_mesh_fmt, "ply_ascii") == 0)
+      snprintf(out_mesh_file, sizeof(out_mesh_file), "pc.ply");
+    else if (strcmp(out_mesh_fmt, "ply_binary") == 0)
+      snprintf(out_mesh_file, sizeof(out_mesh_file), "pc_binary.ply");
+    else
+      snprintf(out_mesh_file, sizeof(out_mesh_file), "pc.off");
+
+    if (convert_off_file("pc.off", out_mesh_file, out_mesh_fmt))
+      fprintf(DFILE, "Power crust also written to %s\n", out_mesh_file);
+    else
+      fprintf(DFILE, "Warning: -O conversion to '%s' failed\n", out_mesh_fmt);
+  }
+
   /* compute the medial axis */
   pr=compute_axis;
   fprintf(DFILE,"\n\n computing the medial axis ....\n");
@@ -911,47 +1023,33 @@ int main(int argc, char **argv) {
 /* for each pole array, compute the maximum of the distances on the sample */
 void compute_distance(simplex** poles, int size, double* distance)
 {
-  int i,j,k,l;
-  double indices[4][3]; /* the coords of the four vertices of the simplex*/
-  point v[MAXDIM];
-  simplex* currSimplex;
+  int l;
 
-  double maxdistance=0;
-  double currdistance;
-
+  /* Each loop iteration only reads poles[l] and writes distance[l], so it
+     is embarrassingly parallel.  The local variables are declared inside
+     the loop to give OpenMP private scope automatically (C99/C11). */
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 64)
+#endif
   for(l=0;l<size;l++)
-  {  /* for each pole do*/
+  {
     if(poles[l]!=NULL)
     {
-      currSimplex=poles[l];
+      int j, k;
+      double indices[4][3];
+      point v[MAXDIM];
+      simplex* currSimplex = poles[l];
 
-      /* get the coordinates of the  four endpoints */
+      /* Gather the four simplex-vertex coordinates. */
       for(j=0;j<4;j++)
       {
         v[j]=currSimplex->neigh[j].vert;
         for(k=0;k<3;k++)
-        {
           indices[j][k]=v[j][k]/mult_up;
-        }
       }
 
-      /* now compute the actual distance  */
-      maxdistance=0;
-
-      for(i=0;i<4;i++)
-      {
-        for(j=i+1;j<4;j++)
-        {
-          currdistance= SQ(indices[i][0]-indices[j][0]) +
-              SQ(indices[i][1]-indices[j][1])+ SQ(indices[i][2]-indices[j][2]);
-          currdistance=sqrt(currdistance);
-          if(maxdistance<currdistance)
-          {
-            maxdistance=currdistance;
-          }
-        }
-      }
-      distance[l]=maxdistance;
+      /* Max edge length using AVX2 (falls back to scalar when unavailable). */
+      distance[l] = sqrt(max_edge_sq_avx2(indices));
     }
   }
 }

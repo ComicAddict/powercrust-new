@@ -16,6 +16,7 @@
 #include <math.h>
 #include <float.h> /* used for DBL_MAX macro definition */
 #include "hull.h" /* sunghee */
+#include "simd_math.h"
 
 void normalize(double a[3])
 {
@@ -28,10 +29,9 @@ void normalize(double a[3])
     a[1]=a[1]/t;
 }
 
-double sqdist(double a[3], double b[3]) 
+double sqdist(double a[3], double b[3])
 {
-	/* returns the squared distance between a and b */ 
-	return SQ(a[0]-b[0])+SQ(a[1]-b[1])+SQ(a[2]-b[2]);
+    return sqdist_fast(a, b);
 }
 
 void dir_and_dist(double a[3], double b[3], double dir[3], double* dist) {
