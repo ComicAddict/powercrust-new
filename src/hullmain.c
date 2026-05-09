@@ -533,6 +533,12 @@ static void load_sites_from_mesh(const char *filename)
     fflush(TFILE);
     num_sites = (long)mv.n;
 
+    /* Advance p one step past the last vertex, exactly matching what
+       read_next_site() does on its terminating (EOF) call.  Without this,
+       read_bounding_box() writes bound[0] over site[num_sites-1] and leaves
+       site[num_sites+7] uninitialised, corrupting the convex hull input. */
+    p = new_site(p, num_sites);
+
     free_mesh_vertices(&mv);
 }
 
