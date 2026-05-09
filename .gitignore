@@ -1,2 +1,11 @@
-target
+target/
 .DS_Store
+
+# Compiled object files
+src/*.o
+
+# CMake build directories
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
